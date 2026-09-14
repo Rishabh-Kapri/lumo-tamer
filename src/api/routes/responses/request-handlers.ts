@@ -8,7 +8,11 @@ import {
   FunctionCallOutputItem,
 } from '../../types.js';
 import { getServerConfig, getReasoningConfig } from '../../../app/config.js';
-import { modelToTier, normalizeModelId, resolveReasoning } from '../../../lumo-client/model-tier.js';
+import {
+  modelToTier,
+  normalizeModelId,
+  resolveReasoning,
+} from '../../../lumo-client/model-tier.js';
 import type { LumoModelTier } from '../../../lumo-client/types.js';
 import { logger } from '../../../app/logger.js';
 import { ResponseEventEmitter } from './events.js';
@@ -41,10 +45,13 @@ interface BuildOutputOptions {
   text: string;
   toolCalls?: ToolCall[] | null;
   itemId?: string;
+  reasoningItemId?: string;
+  reasoningContent?: string;
 }
 
 function buildOutputItems(options: BuildOutputOptions): OutputItem[] {
-  const { text, toolCalls, itemId } = options;
+  const { text, toolCalls, itemId, reasoningItemId, reasoningContent } =
+    options;
 
   const messageItem: MessageOutputItem = {
     type: 'message',
@@ -62,14 +69,33 @@ function buildOutputItems(options: BuildOutputOptions): OutputItem[] {
 
   const output: OutputItem[] = [messageItem];
 
+  if (reasoningContent) {
+    output.push({
+      type: 'reasoning',
+      id: reasoningItemId || generateItemId(),
+      status: 'completed',
+      summary: [],
+      content: [
+        {
+          type: 'reasoning_text',
+          text: reasoningContent,
+        },
+      ],
+    });
+  }
+
   if (toolCalls && toolCalls.length > 0) {
     for (const toolCall of toolCalls) {
-      const argumentsJson = typeof toolCall.arguments === 'string'
-        ? toolCall.arguments
-        : JSON.stringify(toolCall.arguments);
+      const argumentsJson =
+        typeof toolCall.arguments === 'string'
+          ? toolCall.arguments
+          : JSON.stringify(toolCall.arguments);
 
       // Use pre-generated call_id if available, otherwise generate new one
-      const callId = 'call_id' in toolCall ? (toolCall as ToolCallForPersistence).call_id : generateCallId(toolCall.name);
+      const callId =
+        'call_id' in toolCall
+          ? (toolCall as ToolCallForPersistence).call_id
+          : generateCallId(toolCall.name);
 
       output.push({
         type: 'function_call',
@@ -91,7 +117,8 @@ function createCompletedResponse(
   responseId: string,
   createdAt: number,
   request: OpenAIResponseRequest,
-  output: OutputItem[]
+  output: OutputItem[],
+  reasoningEffort: 'none' | 'high',
 ): OpenAIResponse {
   return {
     id: responseId,
@@ -108,7 +135,7 @@ function createCompletedResponse(
     parallel_tool_calls: false,
     previous_response_id: request.previous_response_id ?? null,
     reasoning: {
-      effort: request.reasoning?.effort ?? null,
+      effort: reasoningEffort,
       summary: null,
     },
     store: request.store ?? false,
@@ -138,7 +165,7 @@ export async function handleRequest(
   conversationId: ConversationId | undefined,
   streaming: boolean,
   instructions: string | undefined,
-  injectInstructionsInto: 'first' | 'last'
+  injectInstructionsInto: 'first' | 'last',
 ): Promise<void> {
   const id = generateResponseId();
   const itemId = generateItemId();
@@ -151,7 +178,14 @@ export async function handleRequest(
   const tier: LumoModelTier = request.model
     ? modelToTier(normalizeModelId(request.model))
     : serverConfig.defaultModelTier;
-  const enableReasoning = resolveReasoning(request.reasoning?.effort, getReasoningConfig().default === 'high');
+  const reasoningConfig = getReasoningConfig();
+  const enableReasoning = resolveReasoning(request.reasoning?.effort, reasoningConfig.default === 'high');
+  const surfaceThinking = reasoningConfig.surfaceThinking;
+  const reasoningEffort = enableReasoning ? 'high' : 'none';
+  let reasoningItemId: string | undefined;
+  if (enableReasoning && surfaceThinking) {
+    reasoningItemId = generateItemId();
+  }
 
   // Streaming setup
   const emitter = streaming ? new ResponseEventEmitter(res) : null;
@@ -164,11 +198,16 @@ export async function handleRequest(
       0
     );
     emitter.emitContentPartAdded(itemId, 0, 0);
+    if (reasoningItemId) {
+      emitter.emitReasoningItemAdded(reasoningItemId, 1);
+      emitter.emitReasoningPartAdded(reasoningItemId, 1, 0);
+    }
   }
 
   logger.debug({ hasCustomTools: ctx.hasCustomTools, toolCount: request.tools?.length }, '[Server] Tool detector state');
 
   let accumulatedText = '';
+  let reasoningContent = '';
   let toolCallsForPersist: ToolCallForPersistence[] | undefined;
 
   // Check for command before calling Lumo
@@ -178,7 +217,7 @@ export async function handleRequest(
     emitter?.emitOutputTextDelta(itemId, 0, 0, accumulatedText);
   } else {
     // Normal flow: call Lumo
-    let nextOutputIndex = 1;
+    let nextOutputIndex = reasoningItemId ? 2 : 1;
     const processor = createStreamingToolProcessor(ctx.hasCustomTools, {
       emitTextDelta(text) {
         accumulatedText += text;
@@ -197,10 +236,22 @@ export async function handleRequest(
           injectInstructionsInto,
           modelTier: tier,
           enableReasoning,
-        })
+          onReasoning:
+            reasoningItemId && emitter
+              ? (text) => {
+                reasoningContent += text;
+                emitter.emitReasoningTextDelta(reasoningItemId!, 1, 0, text);
+              }
+              : undefined,
+        }),
       );
 
       logger.debug('[Server] Stream completed');
+
+      if (surfaceThinking && result.reasoning) {
+        reasoningContent = result.reasoning;
+      }
+
       processor.finalize();
       persistTitle(result, deps, conversationId);
       toolCallsForPersist = mapToolCallsForPersistence(processor.toolCallsEmitted);
@@ -220,8 +271,14 @@ export async function handleRequest(
 
   // Build and send response (shared for both command and normal flow)
   try {
-    const output = buildOutputItems({ text: accumulatedText, itemId, toolCalls: toolCallsForPersist });
-    const response = createCompletedResponse(id, createdAt, request, output);
+    const output = buildOutputItems({
+      text: accumulatedText,
+      itemId,
+      reasoningItemId,
+      toolCalls: toolCallsForPersist,
+      reasoningContent,
+    });
+    const response = createCompletedResponse(id, createdAt, request, output, reasoningEffort);
 
     if (emitter) {
       emitter.emitOutputTextDone(itemId, 0, 0, accumulatedText);
@@ -236,6 +293,11 @@ export async function handleRequest(
         },
         0
       );
+      if (reasoningItemId) {
+        emitter.emitReasoningTextDone(reasoningItemId, 1, 0, reasoningContent);
+        emitter.emitReasoningPartDone(reasoningItemId, 1, 0, reasoningContent);
+        emitter.emitReasoningItemDone(reasoningItemId, 1, reasoningContent);
+      }
       emitter.emitResponseCompleted(response);
       res.end();
     } else {
