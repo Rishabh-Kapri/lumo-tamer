@@ -11,6 +11,7 @@ import {
   generateFunctionCallId,
   generateChatCompletionId,
   persistAssistantTurn,
+  buildOpenAIUsage,
 } from '../../src/api/routes/shared.js';
 import { generateCallId, extractToolNameFromCallId } from '../../src/api/tools/call-id.js';
 import { createAccumulatingToolProcessor } from '../../src/api/tools/streaming-processor.js';
@@ -201,5 +202,52 @@ describe('persistAssistantTurn', () => {
     persistAssistantTurn(deps, 'conv-123', message, customToolCalls);
 
     expect(deps.persistedMessages).toEqual([]);
+  });
+});
+
+describe('buildOpenAIUsage', () => {
+  it('returns null when upstream reported no usage at all', () => {
+    expect(buildOpenAIUsage(undefined, 28, 40)).toBeNull();
+  });
+
+  it('estimates prompt tokens from promptLength at ~4 chars/token', () => {
+    const usage = buildOpenAIUsage({ completion_tokens: 25 }, 80, 400);
+
+    expect(usage).toEqual({
+      prompt_tokens: 20,
+      completion_tokens: 25,
+      total_tokens: 45,
+    });
+  });
+
+  it('does not flag the estimate when upstream reported completion tokens', () => {
+    const usage = buildOpenAIUsage({ completion_tokens: 10 }, 28, 16);
+    expect(usage).not.toHaveProperty('completion_tokensEstimated');
+    expect(usage).not.toHaveProperty('prompt_tokensEstimated');
+  });
+
+  it('flags completion as estimated when upstream omitted completion tokens', () => {
+    // completionLength=20 -> ceil(20/4) = 5 estimated completion tokens
+    const usage = buildOpenAIUsage({}, 28, 20);
+
+    expect(usage).toMatchObject({ completion_tokens: 5 });
+    expect(usage).toHaveProperty('completion_tokensEstimated', true);
+  });
+
+  it('treats zero upstream completion count as absent', () => {
+    const usage = buildOpenAIUsage({ completion_tokens: 0 }, 28, 8);
+
+    expect(usage).toMatchObject({ completion_tokens: 2 });
+    expect(usage).toHaveProperty('completion_tokensEstimated', true);
+  });
+
+  it('tolerates zero promptLength and zero completionLength', () => {
+    const usage = buildOpenAIUsage({ completion_tokens: 3 }, 0, 0);
+
+    expect(usage).toEqual({
+      prompt_tokens: 0,
+      completion_tokens: 3,
+      total_tokens: 3,
+    });
   });
 });

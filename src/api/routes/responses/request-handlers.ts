@@ -28,6 +28,7 @@ import {
   generateItemId,
   generateFunctionCallId,
   mapToolCallsForPersistence,
+  buildOpenAIUsage,
   tryExecuteCommand,
   setSSEHeaders,
   type ToolCallForPersistence,
@@ -121,7 +122,7 @@ function createCompletedResponse(
   request: OpenAIResponseRequest,
   output: OutputItem[],
   reasoningEffort: 'none' | 'high',
-): OpenAIResponse {
+  usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | null): OpenAIResponse {
   return {
     id: responseId,
     object: 'response',
@@ -151,7 +152,15 @@ function createCompletedResponse(
     tools: request.tools ?? [],
     top_p: 1.0,
     truncation: 'auto',
-    usage: null,
+    usage: usage
+      ? {
+          input_tokens: usage.prompt_tokens,
+          input_tokens_details: { cached_tokens: 0 },
+          output_tokens: usage.completion_tokens,
+          output_tokens_details: { reasoning_tokens: 0 },
+          total_tokens: usage.total_tokens,
+        }
+      : null,
     user: request.user ?? null,
     metadata: request.metadata || {},
   };
@@ -211,6 +220,7 @@ export async function handleRequest(
 
   let accumulatedText = '';
   let reasoningContent = '';
+  let resultUsage: ReturnType<typeof buildOpenAIUsage> = null;
   let toolCallsForPersist: ToolCallForPersistence[] | undefined;
 
   // Check for command before calling Lumo
@@ -256,6 +266,7 @@ export async function handleRequest(
       }
 
       processor.finalize();
+      resultUsage = buildOpenAIUsage(result.usage, result.promptLength ?? 0, result.completionLength ?? 0);
       persistTitle(result, deps, conversationId);
       toolCallsForPersist = mapToolCallsForPersistence(processor.toolCallsEmitted);
 
@@ -281,7 +292,7 @@ export async function handleRequest(
       toolCalls: toolCallsForPersist,
       reasoningContent,
     });
-    const response = createCompletedResponse(id, createdAt, request, output, reasoningEffort);
+    const response = createCompletedResponse(id, createdAt, request, output, reasoningEffort, resultUsage);
 
     if (emitter) {
       emitter.emitOutputTextDone(itemId, messageOutputIndex, 0, accumulatedText);

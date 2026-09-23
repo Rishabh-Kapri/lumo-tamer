@@ -6,9 +6,13 @@ import type { CommandContext } from '../../app/commands.js';
 import type { EndpointDependencies, OpenAITool, OpenAIToolCall } from '../types.js';
 import type { ConversationId } from '../../conversations/types.js';
 import type { ChatResult, AssistantMessageData } from '../../lumo-client/index.js';
+import type { LumoUsage } from '../../lumo-client/types.js';
 
 // Re-export for convenience
 export { tryExecuteCommand, type CommandResult } from '../../app/commands.js';
+
+// Standard English-text approximation used for token estimation.
+const CHARS_PER_TOKEN = 4;
 
 // ── Tool call type for persistence ─────────────────────────────────
 
@@ -104,6 +108,42 @@ export function persistAssistantTurn(
     // Stateless: track metric only (no persistence)
     getMetrics()?.messagesTotal.inc({ role: 'assistant' });
   }
+}
+
+// ── Usage forwarding ───────────────────────────────────────────────
+
+/**
+ * Build an OpenAI-style usage object from Proton's LumoUsage.
+ *
+ * Proton reports completion tokens but NOT prompt tokens (see LumoUsage docs).
+ * To keep gateway cost accounting meaningful, prompt tokens are estimated from
+ * the request payload at ~4 chars/token (a standard heuristic for English
+ * text) and marked with a `prompt_tokensEstimated: true` flag so downstream
+ * consumers know it is not an upstream-reported count. When Proton omits
+ * completion tokens too, the completion count is estimated the same way and
+ * flagged with `completion_tokensEstimated: true`.
+ */
+export function buildOpenAIUsage(
+  usage: LumoUsage | undefined,
+  promptLength: number,
+  completionLength: number
+): { prompt_tokens: number; completion_tokens: number; total_tokens: number; prompt_tokensEstimated?: boolean; completion_tokensEstimated?: boolean } | null {
+  if (!usage) return null;
+  const completion = typeof usage.completion_tokens === 'number' && usage.completion_tokens > 0
+    ? usage.completion_tokens
+    : Math.ceil(completionLength / CHARS_PER_TOKEN);
+  const prompt = Math.ceil(promptLength / CHARS_PER_TOKEN);
+  const out: { prompt_tokens: number; completion_tokens: number; total_tokens: number; prompt_tokensEstimated?: boolean; completion_tokensEstimated?: boolean } = {
+    prompt_tokens: prompt,
+    completion_tokens: completion,
+    total_tokens: prompt + completion,
+  };
+  // Flag which side was estimated. Upstream normally reports completion
+  // tokens; when it does not, the completion count is our estimate.
+  if (typeof usage.completion_tokens !== 'number' || usage.completion_tokens <= 0) {
+    out.completion_tokensEstimated = true;
+  }
+  return out;
 }
 
 // ── ID generation ─────────────────────────────────────────────────
