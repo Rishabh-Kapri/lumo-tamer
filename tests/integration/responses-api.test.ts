@@ -323,7 +323,7 @@ describe('/v1/responses', () => {
       const reasoningItemId = reasoningEvents[0].item.id;
       expect(reasoningEvents.map((event) => event.item_id ?? event.item.id))
         .toEqual(Array(reasoningEvents.length).fill(reasoningItemId));
-      expect(reasoningEvents.every((event) => event.output_index === 1)).toBe(true);
+      expect(reasoningEvents.every((event) => event.output_index === 0)).toBe(true);
 
       const contentEvents = reasoningEvents.filter((event) => 'content_index' in event);
       expect(contentEvents.every((event) => event.content_index === 0)).toBe(true);

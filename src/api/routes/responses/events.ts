@@ -106,7 +106,7 @@ export class ResponseEventEmitter {
       item_id: itemId,
       output_index: outputIndex,
       content_index: contentIndex,
-      text: text,
+      text,
       sequence_number: this.sequenceNumber++,
     });
   }

@@ -67,12 +67,12 @@ function buildOutputItems(options: BuildOutputOptions): OutputItem[] {
     ],
   };
 
-  const output: OutputItem[] = [messageItem];
+  const output: OutputItem[] = [];
 
   if (reasoningContent) {
     output.push({
       type: 'reasoning',
-      id: reasoningItemId || generateItemId(),
+      id: reasoningItemId!,
       status: 'completed',
       summary: [],
       content: [
@@ -83,6 +83,8 @@ function buildOutputItems(options: BuildOutputOptions): OutputItem[] {
       ],
     });
   }
+
+  output.push(messageItem);
 
   if (toolCalls && toolCalls.length > 0) {
     for (const toolCall of toolCalls) {
@@ -186,6 +188,7 @@ export async function handleRequest(
   if (enableReasoning && surfaceThinking) {
     reasoningItemId = generateItemId();
   }
+  const messageOutputIndex = reasoningItemId ? 1 : 0;
 
   // Streaming setup
   const emitter = streaming ? new ResponseEventEmitter(res) : null;
@@ -193,15 +196,15 @@ export async function handleRequest(
     setSSEHeaders(res);
     emitter.emitResponseCreated(id, createdAt, model);
     emitter.emitResponseInProgress(id, createdAt, model);
+    if (reasoningItemId) {
+      emitter.emitReasoningItemAdded(reasoningItemId, 0);
+      emitter.emitReasoningPartAdded(reasoningItemId, 0, 0);
+    }
     emitter.emitOutputItemAdded(
       { id: itemId, type: 'message', role: 'assistant', status: 'in_progress', content: [] },
-      0
+      messageOutputIndex
     );
-    emitter.emitContentPartAdded(itemId, 0, 0);
-    if (reasoningItemId) {
-      emitter.emitReasoningItemAdded(reasoningItemId, 1);
-      emitter.emitReasoningPartAdded(reasoningItemId, 1, 0);
-    }
+    emitter.emitContentPartAdded(itemId, messageOutputIndex, 0);
   }
 
   logger.debug({ hasCustomTools: ctx.hasCustomTools, toolCount: request.tools?.length }, '[Server] Tool detector state');
@@ -214,14 +217,14 @@ export async function handleRequest(
   const commandResult = await tryExecuteCommand(turns, ctx.commandContext);
   if (commandResult) {
     accumulatedText = commandResult.response;
-    emitter?.emitOutputTextDelta(itemId, 0, 0, accumulatedText);
+    emitter?.emitOutputTextDelta(itemId, messageOutputIndex, 0, accumulatedText);
   } else {
     // Normal flow: call Lumo
     let nextOutputIndex = reasoningItemId ? 2 : 1;
     const processor = createStreamingToolProcessor(ctx.hasCustomTools, {
       emitTextDelta(text) {
         accumulatedText += text;
-        emitter?.emitOutputTextDelta(itemId, 0, 0, text);
+        emitter?.emitOutputTextDelta(itemId, messageOutputIndex, 0, text);
       },
       emitToolCall(callId, tc) {
         emitter?.emitFunctionCallEvents(id, callId, tc.name, JSON.stringify(tc.arguments), nextOutputIndex++);
@@ -240,7 +243,7 @@ export async function handleRequest(
             reasoningItemId && emitter
               ? (text) => {
                 reasoningContent += text;
-                emitter.emitReasoningTextDelta(reasoningItemId!, 1, 0, text);
+                emitter.emitReasoningTextDelta(reasoningItemId!, 0, 0, text);
               }
               : undefined,
         }),
@@ -248,7 +251,7 @@ export async function handleRequest(
 
       logger.debug('[Server] Stream completed');
 
-      if (surfaceThinking && result.reasoning) {
+      if (!emitter && surfaceThinking && result.reasoning) {
         reasoningContent = result.reasoning;
       }
 
@@ -281,8 +284,8 @@ export async function handleRequest(
     const response = createCompletedResponse(id, createdAt, request, output, reasoningEffort);
 
     if (emitter) {
-      emitter.emitOutputTextDone(itemId, 0, 0, accumulatedText);
-      emitter.emitContentPartDone(itemId, 0, 0, accumulatedText);
+      emitter.emitOutputTextDone(itemId, messageOutputIndex, 0, accumulatedText);
+      emitter.emitContentPartDone(itemId, messageOutputIndex, 0, accumulatedText);
       emitter.emitOutputItemDone(
         {
           id: itemId,
@@ -291,12 +294,12 @@ export async function handleRequest(
           status: 'completed',
           content: [{ type: 'output_text', text: accumulatedText, annotations: [] }],
         },
-        0
+        messageOutputIndex
       );
       if (reasoningItemId) {
-        emitter.emitReasoningTextDone(reasoningItemId, 1, 0, reasoningContent);
-        emitter.emitReasoningPartDone(reasoningItemId, 1, 0, reasoningContent);
-        emitter.emitReasoningItemDone(reasoningItemId, 1, reasoningContent);
+        emitter.emitReasoningTextDone(reasoningItemId, 0, 0, reasoningContent);
+        emitter.emitReasoningPartDone(reasoningItemId, 0, 0, reasoningContent);
+        emitter.emitReasoningItemDone(reasoningItemId, 0, reasoningContent);
       }
       emitter.emitResponseCompleted(response);
       res.end();
